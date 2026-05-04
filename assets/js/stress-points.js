@@ -40,7 +40,6 @@
         renderer: null,
         controls: null,
         mesh: null,
-        wire: null,
         fpsFrameCount: 0,
         fpsElapsed: 0,
         lastTick: performance.now(),
@@ -380,12 +379,6 @@
             state.scene.remove(state.mesh);
             state.mesh = null;
         }
-        if (state.wire) {
-            state.wire.geometry.dispose();
-            state.wire.material.dispose();
-            state.scene.remove(state.wire);
-            state.wire = null;
-        }
     }
 
     function fitCameraByBounds(bounds) {
@@ -409,10 +402,10 @@
         state.controls.update();
     }
 
-    function buildSurfaceAndWire(payload) {
+    function buildSurface(payload) {
         const vertices = Array.isArray(payload?.vertices) ? payload.vertices : [];
         if (!vertices.length) {
-            throw new Error("JSON 顶点为空，无法构建色带和折线");
+            throw new Error("JSON 顶点为空，无法构建色带面");
         }
 
         const keyToIndex = new Map();
@@ -465,22 +458,6 @@
         const colStep = sampleStride;
 
         const triangles = [];
-        const wireSegments = [];
-        const uniqueEdges = new Set();
-
-        const pushEdge = (a, b) => {
-            if (!Number.isInteger(a) || !Number.isInteger(b) || a === b) {
-                return;
-            }
-            const lo = Math.min(a, b);
-            const hi = Math.max(a, b);
-            const key = `${lo}_${hi}`;
-            if (uniqueEdges.has(key)) {
-                return;
-            }
-            uniqueEdges.add(key);
-            wireSegments.push(a, b);
-        };
 
         for (const key of keyToIndex.keys()) {
             const split = key.split("_");
@@ -510,15 +487,6 @@
             throw new Error("网格三角形为空，无法渲染色带");
         }
 
-        for (let i = 0; i < triangles.length; i += 3) {
-            const a = triangles[i];
-            const b = triangles[i + 1];
-            const c = triangles[i + 2];
-            pushEdge(a, b);
-            pushEdge(b, c);
-            pushEdge(c, a);
-        }
-
         const zRange = Math.max(maxZ - minZ, 1e-9);
         const colors = new Float32Array((positions.length / 3) * 3);
         for (let i = 0; i < zValues.length; i += 1) {
@@ -543,26 +511,8 @@
             flatShading: true,
         });
 
-        const wirePositions = new Float32Array(wireSegments.length * 3);
-        for (let i = 0; i < wireSegments.length; i += 1) {
-            const srcIndex = wireSegments[i] * 3;
-            const dstIndex = i * 3;
-            wirePositions[dstIndex] = positions[srcIndex];
-            wirePositions[dstIndex + 1] = positions[srcIndex + 1];
-            wirePositions[dstIndex + 2] = positions[srcIndex + 2];
-        }
-
-        const wireGeometry = new THREE.BufferGeometry();
-        wireGeometry.setAttribute("position", new THREE.BufferAttribute(wirePositions, 3));
-        const wireMaterial = new THREE.LineBasicMaterial({
-            color: 0x4ad4ff,
-            transparent: true,
-            opacity: 0.44,
-        });
-
         return {
             mesh: new THREE.Mesh(meshGeometry, meshMaterial),
-            wire: new THREE.LineSegments(wireGeometry, wireMaterial),
             pointCount: positions.length / 3,
             triangleCount: triangles.length / 3,
             bounds: { minX, minY, minZ, maxX, maxY, maxZ },
@@ -606,14 +556,12 @@
 
         const request = await fetchStressPayload(projectId, targetPoints, includeInvalidVertices);
         const buildStart = performance.now();
-        const renderData = buildSurfaceAndWire(request.payload);
+        const renderData = buildSurface(request.payload);
         const buildEnd = performance.now();
 
         disposeRenderObjects();
         state.mesh = renderData.mesh;
-        state.wire = renderData.wire;
         state.scene.add(state.mesh);
-        state.scene.add(state.wire);
         fitCameraByBounds(renderData.bounds);
 
         state.currentPointCount = renderData.pointCount;
@@ -968,7 +916,7 @@
         }
 
         animate();
-        logLine("压测页已就绪：按你的原始方案测试单包 JSON（色带+折线）的卡顿阈值。");
+        logLine("压测页已就绪：测试单包 JSON 色带面渲染的卡顿阈值。");
     }
 
     bootstrap().catch((error) => {

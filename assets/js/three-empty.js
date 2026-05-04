@@ -861,8 +861,8 @@
 
         /**
          * createIndexedSurfaceMesh
-         * Function: Build one batched indexed triangle surface from sampled grid vertices.
-         * Color rule: each triangle uses one flat color sampled from triangle-center elevation.
+         * Function: Build one shared-vertex indexed triangle surface.
+         * Color rule: each valid vertex is colored by normalized elevation.
          * Input: vertices, centerX/centerY (reserved), minZ, zRange, sampleStep.
          * Output: THREE.Mesh or null.
          */
@@ -873,12 +873,8 @@
 
             const keyToGeometryIndex = new Map();
             const geometryPositions = [];
-            const keySpan = Math.max(1, Math.trunc(sampleKeySpan) || 1);
-            const makeSampleKey = (row, col) => row * keySpan + col;
-            const getColorForZ = (zValue) => {
-                const t = THREE.MathUtils.clamp((zValue - minZ) / Math.max(zRange, 1e-9), 0, 1);
-                return MeshModule.sampleElevationRamp(t);
-            };
+            const zValues = [];
+            const makeSampleKey = (row, col) => `${row}_${col}`;
 
             for (let i = 0; i < vertices.length; i += 1) {
                 const vertex = vertices[i];
@@ -898,8 +894,12 @@
                 const col = Math.trunc(sampleCol);
 
                 const key = makeSampleKey(row, col);
+                if (keyToGeometryIndex.has(key)) {
+                    continue;
+                }
                 keyToGeometryIndex.set(key, geometryPositions.length / 3);
                 geometryPositions.push(x, y, z);
+                zValues.push(z);
             }
 
             const rowStep = Math.max(1, Math.trunc(sampleStep) || 1);
@@ -909,9 +909,16 @@
             }
 
             const triangleIndices = [];
-            for (const packedKey of keyToGeometryIndex.keys()) {
-                const row = Math.trunc(packedKey / keySpan);
-                const col = packedKey - row * keySpan;
+            for (const key of keyToGeometryIndex.keys()) {
+                const split = key.split("_");
+                if (split.length !== 2) {
+                    continue;
+                }
+                const row = Number(split[0]);
+                const col = Number(split[1]);
+                if (!Number.isFinite(row) || !Number.isFinite(col)) {
+                    continue;
+                }
 
                 const i00 = keyToGeometryIndex.get(makeSampleKey(row, col));
                 const i01 = keyToGeometryIndex.get(makeSampleKey(row, col + colStep));
@@ -930,54 +937,36 @@
                 return null;
             }
 
-            const trianglePositions = [];
-            const triangleColors = [];
-            const triangleMeshIndices = [];
-            let vertexCursor = 0;
-
-            for (let i = 0; i < triangleIndices.length; i += 3) {
-                const a = triangleIndices[i];
-                const b = triangleIndices[i + 1];
-                const c = triangleIndices[i + 2];
-
-                const baseA = a * 3;
-                const baseB = b * 3;
-                const baseC = c * 3;
-
-                const ax = geometryPositions[baseA];
-                const ay = geometryPositions[baseA + 1];
-                const az = geometryPositions[baseA + 2];
-                const bx = geometryPositions[baseB];
-                const by = geometryPositions[baseB + 1];
-                const bz = geometryPositions[baseB + 2];
-                const cx = geometryPositions[baseC];
-                const cy = geometryPositions[baseC + 1];
-                const cz = geometryPositions[baseC + 2];
-
-                const centerZ = (az + bz + cz) / 3;
-                const [r, g, bColor] = getColorForZ(centerZ);
-
-                trianglePositions.push(ax, ay, az, bx, by, bz, cx, cy, cz);
-                triangleColors.push(r, g, bColor, r, g, bColor, r, g, bColor);
-                triangleMeshIndices.push(vertexCursor, vertexCursor + 1, vertexCursor + 2);
-                vertexCursor += 3;
+            let fallbackMinZ = Number.POSITIVE_INFINITY;
+            let fallbackMaxZ = Number.NEGATIVE_INFINITY;
+            if (!Number.isFinite(minZ) || !Number.isFinite(zRange)) {
+                for (let i = 0; i < zValues.length; i += 1) {
+                    fallbackMinZ = Math.min(fallbackMinZ, zValues[i]);
+                    fallbackMaxZ = Math.max(fallbackMaxZ, zValues[i]);
+                }
             }
-
-            if (!trianglePositions.length) {
-                return null;
+            const colors = new Float32Array(zValues.length * 3);
+            const localMinZ = Number.isFinite(minZ) ? minZ : fallbackMinZ;
+            const localZRange = Math.max(Number.isFinite(zRange) ? zRange : fallbackMaxZ - localMinZ, 1e-9);
+            for (let i = 0; i < zValues.length; i += 1) {
+                const t = THREE.MathUtils.clamp((zValues[i] - localMinZ) / localZRange, 0, 1);
+                const [r, g, b] = MeshModule.sampleElevationRamp(t);
+                colors[i * 3] = r;
+                colors[i * 3 + 1] = g;
+                colors[i * 3 + 2] = b;
             }
 
             const surfaceGeometry = new THREE.BufferGeometry();
-            surfaceGeometry.setAttribute("position", new THREE.Float32BufferAttribute(trianglePositions, 3));
-            surfaceGeometry.setAttribute("color", new THREE.Float32BufferAttribute(triangleColors, 3));
-            surfaceGeometry.setIndex(triangleMeshIndices);
+            surfaceGeometry.setAttribute("position", new THREE.Float32BufferAttribute(geometryPositions, 3));
+            surfaceGeometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+            surfaceGeometry.setIndex(triangleIndices);
             surfaceGeometry.computeVertexNormals();
 
             const surfaceMaterial = new THREE.MeshLambertMaterial({
                 vertexColors: true,
                 side: THREE.DoubleSide,
                 transparent: true,
-                opacity: 0.82,
+                opacity: 0.86,
                 flatShading: true,
             });
 
@@ -1119,7 +1108,7 @@
      * 1) initialize renderer/scene
      * 2) resolve project id
      * 3) fetch and normalize TIF payload
-     * 4) add points and wireframe lines
+     * 4) add terrain surface
      * 5) publish ThreeOverlayBridge and fit camera
      * Input: none.
      * Output: Promise<void>.
@@ -1694,7 +1683,6 @@
                 RenderModule.scene.remove(terrainSurface);
                 terrainSurface = null;
             }
-
             terrainSurface = MeshModule.createIndexedSurfaceMesh(
                 mergedVertices,
                 centerX,
